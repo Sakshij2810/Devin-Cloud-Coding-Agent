@@ -25,7 +25,7 @@ const tools: ChatFunctionTool[] = [
     function: {
       name: "bash",
       description:
-        "Run a bash command and return its stdout, stderr and exit code. Use it to explore a file system (ls, cat, find, grep, etc).",
+        "Run a bash command and return its stdout, stderr and exit code.",
       parameters: {
         type: "object",
         properties: {
@@ -60,7 +60,15 @@ const messages: ChatMessages[] = [
   },
   {
     role: "user",
-    content: `Can you tell me more about the project ${TODO_APP_PATH}`,
+    // content: `Can you tell me more about the project ${TODO_APP_PATH}`,
+    content: `In ${TODO_APP_PATH}, create frontend/index.html.
+  Make it a simple, attractive, single-file HTML page
+  explaining that this is a Todo App project.
+  Include a title, short description, and sample todo list.
+  Use inline CSS. No JavaScript, frameworks, or npm packages.
+  Create the frontend folder if needed.
+  Use bash commands to create the file, then verify it exists.
+  Keep the task simple.`,
   },
 ];
 
@@ -71,7 +79,7 @@ async function callLLM(messages: ChatMessages[]): Promise<ChatResult> {
       model: "google/gemini-3-flash-preview",
       tools,
       messages,
-      maxTokens: 4096,
+      maxTokens: 1500,
       stream: false,
     },
   });
