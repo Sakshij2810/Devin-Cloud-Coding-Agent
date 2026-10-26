@@ -1,0 +1,17 @@
+terminal commands
+
+1. install bun ====> curl -fsSL https://bun.com/install | bash
+2. restart terminal
+3. bunx create-turbo@latest
+4. select bun
+
+my-turborepo folder
+
+1. remove nextjs existing frontend folders : docs , web
+2. create "agent" folder
+
+terminal commands
+
+1. cd "agent" folder
+2. run ===> bun init
+3. select Blank - enter

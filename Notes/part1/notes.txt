@@ -1,0 +1,5 @@
+1. add to-do app in my-turborepo folder ----> so that /apps/agent gets access to to-do app context / code
+
+terminal
+
+1. bun add @openrouter/sdk e2b ----> inside agent folder
