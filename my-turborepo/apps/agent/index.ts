@@ -37,12 +37,43 @@ const tools: ChatFunctionTool[] = [
       },
     },
   },
+
+  {
+    type: "function",
+    function: {
+      name: "read_file",
+      description: "Read the file at the given path.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+          },
+        },
+        required: ["path"],
+      },
+    },
+  },
 ];
 
 // when llm asks us to do commands ---> its our agents job to run those commands
+
+// runBash
 async function runBash(command: string) {
   // const result = await Bun.`bash -c ${command}`.nothrow().quiet();
   const result = await $`bash -c ${command}`.nothrow().quiet(); // suggested by gpt
+
+  return {
+    exitCode: result.exitCode,
+    stdout: result.stdout.toString(),
+    stderr: result.stderr.toString(),
+  };
+}
+
+// runReadFile
+async function runReadFile(path: string) {
+  // const result = await Bun.`cat ${path}`.nothrow().quiet();
+  const result = await $`cat ${path}`.nothrow().quiet(); // suggested by gpt
 
   return {
     exitCode: result.exitCode,
@@ -60,15 +91,7 @@ const messages: ChatMessages[] = [
   },
   {
     role: "user",
-    // content: `Can you tell me more about the project ${TODO_APP_PATH}`,
-    content: `In ${TODO_APP_PATH}, create frontend/index.html.
-  Make it a simple, attractive, single-file HTML page
-  explaining that this is a Todo App project.
-  Include a title, short description, and sample todo list.
-  Use inline CSS. No JavaScript, frameworks, or npm packages.
-  Create the frontend folder if needed.
-  Use bash commands to create the file, then verify it exists.
-  Keep the task simple.`,
+    content: `Can you tell me more about the project ${TODO_APP_PATH}`,
   },
 ];
 
@@ -100,24 +123,62 @@ async function callLLM(messages: ChatMessages[]): Promise<ChatResult> {
 
 // it get a toolcall ---> forwards that req to mentioned toolcall
 async function getToolResponse(toolcall: ChatToolCall): Promise<ChatMessages> {
-  //throw error if any other tool call is there than "bash"
-  if (toolcall.function.name !== "bash") {
-    throw new Error(`Unknown tool: ${toolcall.function.name}`);
-  }
+  let isResolved = false;
+  return new Promise(async (resolve, reject) => {
+    // handle timeouts --- if any tool took more than 5 sec to resolve, then resolve that with timeout warning
+    const timer = setTimeout(() => {
+      if (!isResolved) {
+        console.log("Timeout received");
 
-  const { command } = JSON.parse(toolcall.function.arguments) as {
-    command: string;
-  };
+        resolve({
+          role: "tool",
+          toolCallId: toolcall.id,
+          content: JSON.stringify({
+            stdOut: "Warning: Timeout while running this tool",
+          }),
+        });
+      }
+    }, 5000);
 
-  console.log(`$ ${command}`);
+    // toolcall's executions
 
-  const toolResult = await runBash(command);
+    // 1. bash tool
+    if (toolcall.function.name === "bash") {
+      const { command } = JSON.parse(toolcall.function.arguments) as {
+        command: string;
+      };
 
-  return {
-    role: "tool",
-    toolCallId: toolcall.id,
-    content: JSON.stringify(toolResult),
-  };
+      console.log(`$ bash :  ${command}`);
+
+      const toolResult = await runBash(command);
+
+      isResolved = true;
+      clearTimeout(timer);
+      resolve({
+        role: "tool",
+        toolCallId: toolcall.id,
+        content: JSON.stringify(toolResult),
+      });
+    }
+    // 2. read_file tool
+    else if (toolcall.function.name === "read_file") {
+      const { path } = JSON.parse(toolcall.function.arguments) as {
+        path: string;
+      };
+
+      console.log(`$ readFile : ${path}`);
+
+      const toolResult = await runReadFile(path);
+
+      isResolved = true;
+      clearTimeout(timer);
+      resolve({
+        role: "tool",
+        toolCallId: toolcall.id,
+        content: JSON.stringify(toolResult),
+      });
+    }
+  });
 }
 
 const maxIterations = 10;
