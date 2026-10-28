@@ -1,0 +1,11 @@
+Part 2 – Multiple Tools & Timeout Handling
+
+- how to add multiple tools in ChatFunctionTool.
+- Created a separate runReadFile() function for reading files, we can do same for ther future tools
+- Added setTimeout() in getToolResponse() to handle long-running tools.
+- Handled bash and read_file tool calls separately.
+
+Recap:
+
+- Until now, we built a local coding agent (like Claude Code).
+- Next, we'll move to a cloud sandbox to build a coding agent like Devin.

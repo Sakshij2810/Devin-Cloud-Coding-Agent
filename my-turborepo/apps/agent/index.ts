@@ -10,7 +10,9 @@ import { Sandbox, CommandExitError } from "e2b";
 
 import { resolve } from "node:path";
 import { $ } from "bun"; // suggested by gpt
-import { exitCode, stdout } from "node:process";
+import { exitCode, stderr, stdout } from "node:process";
+
+// ---------------------------------- Sanbox and OpenRouter creation ----------------------------------
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const E2B_API_KEY = process.env.E2B_API_KEY;
@@ -28,8 +30,6 @@ const openrouter = new OpenRouter({
   apiKey: OPENROUTER_API_KEY,
 });
 
-const TODO_APP_PATH = resolve(import.meta.dir, "../../todo-app");
-
 // create sandbox
 console.log("Starting sandbox...");
 
@@ -41,6 +41,8 @@ console.log(
 );
 console.log(`Sandbox started: ${sandbox.sandboxId}`);
 
+// const TODO_APP_PATH = resolve(import.meta.dir, "../../todo-app"); // TODO_APP_PATH used in local agent setup
+
 const REPO_URL = "https://github.com/Sakshij2810/Market-Prediction-App-Kalshi-";
 const REPO_PATH = "/home/user/Market-Prediction-App-Kalshi";
 
@@ -50,8 +52,11 @@ await sandbox.commands.run(`git clone --depth 1 ${REPO_URL} ${REPO_PATH}`, {
   timeoutMs: 120_000,
 });
 
-// ChatFunctionTool -> goes to the llm
-const tools: ChatFunctionTool[] = [
+// ---------------------------------- ChatFunctionTool -> goes to the llm ----------------------------------
+
+// base Tools
+const baseTools: ChatFunctionTool[] = [
+  // bash tool
   {
     type: "function",
     function: {
@@ -69,7 +74,7 @@ const tools: ChatFunctionTool[] = [
       },
     },
   },
-
+  // read_file tool
   {
     type: "function",
     function: {
@@ -88,6 +93,32 @@ const tools: ChatFunctionTool[] = [
   },
 ];
 
+// sub-agent tool
+const subAgentTool: ChatFunctionTool = {
+  type: "function",
+  function: {
+    name: "sub_agent",
+    description:
+      "Delegate a difficult, self-contained task (deep investigation, multi-step analysis, tracing logic across many files) to a sub-agent. The sub-agent has its own fresh context and the same bash/read_file tools, but cannot see this conversation, so describe the task and any relevant context fully. Returns the sub-agent's final report.",
+    parameters: {
+      type: "object",
+      properties: {
+        task: {
+          type: "string",
+          description:
+            "A complete, standalone description of what the sub-agent should do and what it should report back.",
+        },
+      },
+      required: ["task"],
+    },
+  },
+};
+
+// mainTools
+// the sub-agent only gets the base tools, so it can't spawn sub-agents of its own
+const mainTools: ChatFunctionTool[] = [...baseTools, subAgentTool];
+
+// ---------------------------------- runBash, runReadFile  ----------------------------------
 // when llm asks us to do commands ---> its our agents job to run those commands
 
 // runBash
@@ -149,7 +180,9 @@ async function runReadFile(path: string) {
   }
 }
 
+// ---------------------------------- ChatMessages----------------------------------
 // first 2 messages goes to the llm call
+
 const messages: ChatMessages[] = [
   {
     role: "system",
@@ -158,18 +191,24 @@ const messages: ChatMessages[] = [
   },
   {
     role: "user",
-    content: `Can you tell me more about the project ${TODO_APP_PATH}`,
+    // content: `Can you do a security check using sub agents of this repo ${REPO_PATH}`,
+    content: `Can you explain me this project using sub agents help ${REPO_PATH}`,
   },
 ];
 
+// ---------------------------------- callLLM----------------------------------
 // callLLM ----> wrapper on top of "openrouter.chat.send" ---> this send req to model ---> get back the response ---> at the end stores response in [messages] --> this message is the LLM memory
-async function callLLM(messages: ChatMessages[]): Promise<ChatResult> {
+
+async function callLLM(
+  messages: ChatMessages[],
+  tools: ChatFunctionTool[],
+): Promise<ChatResult> {
   const result = await openrouter.chat.send({
     chatRequest: {
       model: "google/gemini-3-flash-preview",
       tools,
       messages,
-      maxTokens: 1500,
+      maxTokens: 800, //reduces the maximum size of each generated response. It can reduce the estimated cost of a request, but may be too small for a detailed security report.
       stream: false,
     },
   });
@@ -188,101 +227,209 @@ async function callLLM(messages: ChatMessages[]): Promise<ChatResult> {
   return result;
 }
 
-// it get a toolcall ---> forwards that req to mentioned toolcall
-async function getToolResponse(toolcall: ChatToolCall): Promise<ChatMessages> {
-  let isResolved = false;
-  return new Promise(async (resolve, reject) => {
-    // handle timeouts --- if any tool took more than 5 sec to resolve, then resolve that with timeout warning
-    const timer = setTimeout(() => {
-      if (!isResolved) {
-        console.log("Timeout received");
+// ---------------------------------- ChatToolCall----------------------------------
+// runTool
+async function runTool(toolCall: ChatToolCall, tools: ChatFunctionTool[]) {
+  const name = toolCall.function.name;
 
-        resolve({
-          role: "tool",
-          toolCallId: toolcall.id,
-          content: JSON.stringify({
-            stdOut: "Warning: Timeout while running this tool",
-          }),
-        });
-      }
-    }, 5000);
+  // validate tools
+  if (
+    !tools.some((tool) => "function" in tool && tool.function.name === name)
+  ) {
+    return { exitCode: 1, stdout: "", stderr: `Unknown tool: ${name}` };
+  }
 
-    // toolcall's executions
+  // sub_agent tool
+  if (name === "sub_agent") {
+    const { task } = JSON.parse(toolCall.function.arguments) as {
+      task: string;
+    };
 
-    // 1. bash tool
-    if (toolcall.function.name === "bash") {
-      const { command } = JSON.parse(toolcall.function.arguments) as {
+    console.log(`Tool: SubAgent > ${task}`);
+
+    return { result: await runSubAgent(task) };
+  }
+
+  // handle timeouts --- if any tool took more than 5 sec to resolve, then resolve that with timeout warning
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const timeout = new Promise<{ stdout: string }>((resolve) => {
+    timer = setTimeout(() => {
+      console.log("timeout received");
+      resolve({ stdout: "Timeout while running the tool" });
+    }, 30000);
+  });
+
+  // toolcall's executions
+  const run = async () => {
+    // 1. bash tool - runBash
+    if (name === "bash") {
+      const { command } = JSON.parse(toolCall.function.arguments) as {
         command: string;
       };
-
-      console.log(`$ bash :  ${command}`);
-
-      const toolResult = await runBash(command);
-
-      isResolved = true;
-      clearTimeout(timer);
-      resolve({
-        role: "tool",
-        toolCallId: toolcall.id,
-        content: JSON.stringify(toolResult),
-      });
+      console.log(`Tool: Bash $ ${command}`);
+      return runBash(command);
     }
-    // 2. read_file tool
-    else if (toolcall.function.name === "read_file") {
-      const { path } = JSON.parse(toolcall.function.arguments) as {
-        path: string;
-      };
 
-      console.log(`$ readFile : ${path}`);
+    // 2. read_file tool - runReadFile
+    const { path } = JSON.parse(toolCall.function.arguments) as {
+      path: string;
+    };
+    console.log(`Tool: ReadFile ${path}`);
+    return runReadFile(path);
+  };
 
-      const toolResult = await runReadFile(path);
+  try {
+    return await Promise.race([run(), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
-      isResolved = true;
-      clearTimeout(timer);
-      resolve({
-        role: "tool",
-        toolCallId: toolcall.id,
-        content: JSON.stringify(toolResult),
-      });
-    }
+// it get a toolcall ---> forwards that req to mentioned toolcall
+// getToolResponse
+async function getToolResponse(
+  toolcall: ChatToolCall,
+  tools: ChatFunctionTool[],
+): Promise<ChatMessages> {
+  return {
+    role: "tool",
+    toolCallId: toolcall.id,
+    content: JSON.stringify(await runTool(toolcall, tools)),
+  };
+}
+
+// ---------------------------------- Agent Loop + Context Engineering (Compaction, Summarization, Sub-agent tool) ----------------------------------
+// system prompt + original user task are always kept verbatim (exactly as it was spoken or written)
+
+const MAX_CONTEXT_TOKENS = 80_000; // makes your agent summarize its conversation history much earlier instead of allowing it to grow past 30,000 tokens before compaction.
+const PINNED_MESSAGE_COUNT = 2;
+
+// summarizeMessages
+async function summarizeMessages(messages: ChatMessages[]) {
+  const pinned = messages.slice(0, PINNED_MESSAGE_COUNT);
+  const history = messages.slice(PINNED_MESSAGE_COUNT);
+
+  if (history.length == 0) {
+    return;
+  }
+
+  console.log(`Summarizing ${history.length} messages...`);
+
+  // make call to LLM for summarizing hirstory messages
+  const result = await openrouter.chat.send({
+    chatRequest: {
+      model: "google/gemini-3-flash-preview",
+      messages: [
+        {
+          role: "system",
+          content:
+            "You compress the working history of a coding agent so it can continue its task. Write a concise but complete summary covering: what has been explored, commands run and their key results, important file paths and contents/findings, decisions made, and what remains to be done. Do not drop facts the agent will need to finish the task.",
+        },
+        {
+          role: "user",
+          content: `Original task:\n${JSON.stringify(pinned[1]?.content)}\n\nHistory to summarize:\n${JSON.stringify(history)}`,
+        },
+      ],
+      stream: false,
+    },
+  });
+
+  if (!("choices" in result)) {
+    throw new Error("Expected a non-streaming response");
+  }
+
+  const summary = result.choices[0]?.message.content;
+
+  if (!summary) {
+    throw new Error("Expected the model to return a summary");
+  }
+
+  // keep 1st 2 messages -> and remove old history messages -> then add newly summarised response
+  messages.splice(PINNED_MESSAGE_COUNT, history.length, {
+    role: "user",
+    content: `Summary of your progress so far (earlier messages were compacted to save context):\n\n${typeof summary === "string" ? summary : JSON.stringify(summary)}\n\nContinue the task from here.`,
   });
 }
 
-const maxIterations = 20;
-let iterationCount = 0;
-let didReachMaxIterations = true;
+// runAgent
+async function runAgent(
+  messages: ChatMessages[],
+  tools: ChatFunctionTool[],
+  maxIterations: number,
+  label: string,
+) {
+  let iterationCount = 0;
 
-// agent loop
-while (iterationCount < maxIterations) {
-  iterationCount++;
+  // agent loop
+  while (iterationCount < maxIterations) {
+    iterationCount++;
 
-  const response = await callLLM(messages);
-  const choice = response.choices[0];
+    const response = await callLLM(messages, tools);
 
-  if (!choice) {
-    throw new Error(`Expected a model to return a choice`);
+    // start : cloud agent new code
+    const contextTokens =
+      (response.usage?.promptTokens ?? 0) +
+      (response.usage?.completionTokens ?? 0);
+
+    console.log(
+      `[${label}] Iteration ${iterationCount}: context ${contextTokens} tokens`,
+    );
+
+    // end : cloud agent new code
+
+    const choice = response.choices[0];
+
+    if (!choice) {
+      throw new Error(`Expected a model to return a choice`);
+    }
+
+    const toolCalls = choice.message.toolCalls;
+
+    // llm done doing everything ---> llm has all context llm wants to generate response ---> so no toolcall anymore ---> then break
+    if (!toolCalls || toolCalls.length == 0) {
+      return choice.message.content;
+    }
+
+    // push every toolcall's response in messages
+    for (const toolCall of toolCalls) {
+      messages.push(await getToolResponse(toolCall, tools));
+    }
+
+    // start : cloud agent new code
+    if (contextTokens > MAX_CONTEXT_TOKENS) {
+      await summarizeMessages(messages);
+      console.log(messages);
+    }
+    // end : cloud agent new code
   }
 
-  const toolCalls = choice.message.toolCalls;
-
-  // llm done doing everything ---> llm has all context llm wants to generate response ---> so no toolcall anymore ---> then break
-  if (!toolCalls || toolCalls.length == 0) {
-    didReachMaxIterations = false;
-    break;
-  }
-
-  // push every toolcall's response in messages
-  for (const toolCall of toolCalls) {
-    messages.push(await getToolResponse(toolCall));
-  }
+  console.warn(`[${label}] Warning: Maximum iterations reached`);
+  return messages[messages.length - 1]?.content;
 }
 
-if (didReachMaxIterations) {
-  console.warn("Warning: Maximum iterations reached");
-}
+// runSubAgent
+async function runSubAgent(task: string) {
+  const subMessages: ChatMessages[] = [
+    {
+      role: "system",
+      content: `You are a sub-agent of a coding agent, running inside a sandbox. You have been delegated one specific task. Use the bash and read_file tools to complete it thoroughly. The working directory is ${REPO_PATH}. When you are done, reply with a complete, self-contained report of your findings or results - it is the only thing the main agent will see.`,
+    },
+    {
+      role: "user",
+      content: task,
+    },
+  ];
 
-// print final response returned by llm
-console.log(messages[messages.length - 1]?.content);
+  const result = await runAgent(subMessages, baseTools, 20, "sub-agent");
+  console.log(`[sub-agent] Done`);
+  return result ?? "The sub-agent did not produce a result.";
+}
+// ---------------------------------- Ending work ----------------------------------
+
+// call runAgent: print final response returned by llm
+const finalAnswer = await runAgent(messages, mainTools, 40, "main");
+console.log(finalAnswer);
 
 // at the end kill sanbox
 await sandbox.kill();
