@@ -4,18 +4,19 @@ import type {
   ChatResult,
   ChatToolCall,
 } from "@openrouter/sdk/models";
-
 import { OpenRouter } from "@openrouter/sdk";
 import { Sandbox, CommandExitError } from "e2b";
 
-import { resolve } from "node:path";
-import { $ } from "bun"; // suggested by gpt
-import { exitCode, stderr, stdout } from "node:process";
+// import { $ } from "bun"; // suggested by gpt
 
-// ---------------------------------- Sanbox and OpenRouter creation ----------------------------------
+import { createInstallationToken, getAppBotIdentity } from "./github.ts";
+
+// ---------------------------------- Sanbox, OpenRouter and Github App Connetor creation ----------------------------------
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const E2B_API_KEY = process.env.E2B_API_KEY;
+const { GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, GITHUB_INSTALLATION_ID } =
+  process.env;
 
 if (!OPENROUTER_API_KEY) {
   throw new Error("set OPENROUTER_API_KEY in apps/agent/.env");
@@ -25,26 +26,62 @@ if (!E2B_API_KEY) {
   throw new Error("set E2B_API_KEY in apps/agent/.env");
 }
 
+if (!GITHUB_APP_ID || !GITHUB_APP_PRIVATE_KEY_PATH || !GITHUB_INSTALLATION_ID) {
+  throw new Error(
+    "Set GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH and GITHUB_INSTALLATION_ID in apps/agent/.env",
+  );
+}
+
 // create openrouter
 const openrouter = new OpenRouter({
   apiKey: OPENROUTER_API_KEY,
 });
 
+// github connetor
+const REPO_OWNER = "developer-G-2";
+const REPO_NAME = "Prediction-Market";
+const REPO_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}`;
+const REPO_PATH = "/home/user/Market-Prediction-App-Kalshi";
+
+const githubApp = {
+  appId: GITHUB_APP_ID,
+  privateKey: await Bun.file(GITHUB_APP_PRIVATE_KEY_PATH).text(),
+};
+
+console.log("Minting GitHub installation token...");
+
+const githubToken = await createInstallationToken(
+  githubApp,
+  GITHUB_INSTALLATION_ID,
+  REPO_NAME,
+);
+const botIdentity = await getAppBotIdentity(githubApp, githubToken.token);
+
+console.log(`GitHub token expires at ${githubToken.expiresAt}`);
+
 // create sandbox
 console.log("Starting sandbox...");
 
 const startTime = Date.now();
-const sandbox = await Sandbox.create();
+const sandbox = await Sandbox.create({
+  envs: { GITHUB_TOKEN: githubToken.token, GH_TOKEN: githubToken.token },
+});
 
 console.log(
   `It took ${(Date.now() - startTime) / 1000} seconds to start the sandbox.`,
 );
 console.log(`Sandbox started: ${sandbox.sandboxId}`);
 
-// const TODO_APP_PATH = resolve(import.meta.dir, "../../todo-app"); // TODO_APP_PATH used in local agent setup
+// read the token from the env at use time so it is never written into .git/config
+await sandbox.commands.run(
+  [
+    `git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f'`,
+    `git config --global user.name '${botIdentity.name}'`,
+    `git config --global user.email '${botIdentity.email}'`,
+  ].join(" && "),
+);
 
-const REPO_URL = "https://github.com/Sakshij2810/Market-Prediction-App-Kalshi-";
-const REPO_PATH = "/home/user/Market-Prediction-App-Kalshi";
+// const TODO_APP_PATH = resolve(import.meta.dir, "../../todo-app"); // TODO_APP_PATH used in local agent setup
 
 // clone repo on sandbox by running following command in sandbox
 console.log(`Cloning ${REPO_URL}...`);
@@ -186,13 +223,11 @@ async function runReadFile(path: string) {
 const messages: ChatMessages[] = [
   {
     role: "system",
-    content:
-      "You are a helpful coding agent. Use the bash tool to explore files before answering questions about them.",
+    content: `You are a helpful coding agent running inside a sandbox. Use the bash tool to explore files before answering questions about them. For difficult, self-contained subtasks (deep investigations, tracing logic across many files), delegate to the sub_agent tool with a complete task description. The working directory is ${REPO_PATH}, a clone of ${REPO_OWNER}/${REPO_NAME}. Git is authenticated, so you can push branches to origin. To open a pull request, push a new branch (never push to the default branch) and call the GitHub API with the token in $GITHUB_TOKEN, e.g. curl -X POST -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls -d '{"title":"...","head":"<branch>","base":"<default branch>","body":"..."}'. Never print or log the token.`,
   },
   {
     role: "user",
-    // content: `Can you do a security check using sub agents of this repo ${REPO_PATH}`,
-    content: `Can you explain me this project using sub agents help ${REPO_PATH}`,
+    content: `Can you please create style.css file, use existing classes mentioned in index.html. No need to spend too much time doing it. ${REPO_PATH}.`,
   },
 ];
 
@@ -208,7 +243,7 @@ async function callLLM(
       model: "google/gemini-3-flash-preview",
       tools,
       messages,
-      maxTokens: 800, //reduces the maximum size of each generated response. It can reduce the estimated cost of a request, but may be too small for a detailed security report.
+      maxTokens: 1000, //reduces the maximum size of each generated response. It can reduce the estimated cost of a request, but may be too small for a detailed security report.
       stream: false,
     },
   });
@@ -379,6 +414,14 @@ async function runAgent(
     // end : cloud agent new code
 
     const choice = response.choices[0];
+
+    // console.log("Finish reason:", choice?.finishReason);
+    // console.log("Full model message:");
+    // console.dir(choice?.message, { depth: null });
+
+    // console.log("Content:", choice?.message.content);
+    // console.log("Tool calls:", choice?.message.toolCalls);
+    // console.log("Usage:", response.usage);
 
     if (!choice) {
       throw new Error(`Expected a model to return a choice`);
