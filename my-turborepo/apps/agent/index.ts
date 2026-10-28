@@ -6,17 +6,49 @@ import type {
 } from "@openrouter/sdk/models";
 
 import { OpenRouter } from "@openrouter/sdk";
+import { Sandbox, CommandExitError } from "e2b";
 
 import { resolve } from "node:path";
 import { $ } from "bun"; // suggested by gpt
+import { exitCode, stdout } from "node:process";
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const E2B_API_KEY = process.env.E2B_API_KEY;
 
+if (!OPENROUTER_API_KEY) {
+  throw new Error("set OPENROUTER_API_KEY in apps/agent/.env");
+}
+
+if (!E2B_API_KEY) {
+  throw new Error("set E2B_API_KEY in apps/agent/.env");
+}
+
+// create openrouter
 const openrouter = new OpenRouter({
   apiKey: OPENROUTER_API_KEY,
 });
 
 const TODO_APP_PATH = resolve(import.meta.dir, "../../todo-app");
+
+// create sandbox
+console.log("Starting sandbox...");
+
+const startTime = Date.now();
+const sandbox = await Sandbox.create();
+
+console.log(
+  `It took ${(Date.now() - startTime) / 1000} seconds to start the sandbox.`,
+);
+console.log(`Sandbox started: ${sandbox.sandboxId}`);
+
+const REPO_URL = "https://github.com/Sakshij2810/Market-Prediction-App-Kalshi-";
+const REPO_PATH = "/home/user/Market-Prediction-App-Kalshi";
+
+// clone repo on sandbox by running following command in sandbox
+console.log(`Cloning ${REPO_URL}...`);
+await sandbox.commands.run(`git clone --depth 1 ${REPO_URL} ${REPO_PATH}`, {
+  timeoutMs: 120_000,
+});
 
 // ChatFunctionTool -> goes to the llm
 const tools: ChatFunctionTool[] = [
@@ -60,26 +92,61 @@ const tools: ChatFunctionTool[] = [
 
 // runBash
 async function runBash(command: string) {
-  // const result = await Bun.`bash -c ${command}`.nothrow().quiet();
-  const result = await $`bash -c ${command}`.nothrow().quiet(); // suggested by gpt
+  try {
+    // const result = await Bun.`bash -c ${command}`.nothrow().quiet(); // originial tutorial
 
-  return {
-    exitCode: result.exitCode,
-    stdout: result.stdout.toString(),
-    stderr: result.stderr.toString(),
-  };
+    // 1. approach:  for local coding agent use this
+    // const result = await $`bash -c ${command}`.nothrow().quiet(); // suggested by gpt
+
+    // 2. approach:  for cloud coding agent use this
+    const result = await sandbox.commands.run(command, { cwd: REPO_PATH });
+
+    return {
+      exitCode: result.exitCode,
+      stdout: result.stdout.toString(),
+      stderr: result.stderr.toString(),
+    };
+  } catch (error) {
+    // commands.run throws on a non-zero exit code; pass it back to the model as a result
+    if (error instanceof CommandExitError) {
+      return {
+        exitCode: error.exitCode,
+        stdout: error.stdout.toString(),
+        stderr: error.stderr.toString(),
+      };
+    }
+    throw error;
+  }
 }
 
 // runReadFile
 async function runReadFile(path: string) {
-  // const result = await Bun.`cat ${path}`.nothrow().quiet();
-  const result = await $`cat ${path}`.nothrow().quiet(); // suggested by gpt
+  try {
+    // const result = await Bun.`cat ${path}`.nothrow().quiet(); // originial tutorial
 
-  return {
-    exitCode: result.exitCode,
-    stdout: result.stdout.toString(),
-    stderr: result.stderr.toString(),
-  };
+    // 1. approach:  for local coding agent use this
+    // const result = await $`cat ${path}`.nothrow().quiet(); // suggested by gpt
+    // return {
+    //   exitCode: result.exitCode,
+    //   stdout: result.stdout.toString(),
+    //   stderr: result.stderr.toString(),
+    // };
+
+    // 2. approach:  for cloud coding agent use this
+    const content = await sandbox.files.read(path);
+
+    return {
+      exitCode: 0,
+      stdout: content,
+      stderr: "",
+    };
+  } catch (error) {
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: String(error),
+    };
+  }
 }
 
 // first 2 messages goes to the llm call
@@ -181,7 +248,7 @@ async function getToolResponse(toolcall: ChatToolCall): Promise<ChatMessages> {
   });
 }
 
-const maxIterations = 10;
+const maxIterations = 20;
 let iterationCount = 0;
 let didReachMaxIterations = true;
 
@@ -216,3 +283,6 @@ if (didReachMaxIterations) {
 
 // print final response returned by llm
 console.log(messages[messages.length - 1]?.content);
+
+// at the end kill sanbox
+await sandbox.kill();
