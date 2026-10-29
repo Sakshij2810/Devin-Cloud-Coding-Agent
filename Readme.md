@@ -21,6 +21,7 @@ Build an AI coding agent capable of working autonomously on a codebase.
 - Run tests
 - Inspect errors
 - Iterate on its solution
+- create PR
 
 ### Example
 
