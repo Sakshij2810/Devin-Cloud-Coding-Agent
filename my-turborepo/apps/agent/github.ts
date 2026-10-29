@@ -12,6 +12,8 @@ function base64url(input: string | Buffer) {
   return Buffer.from(input).toString("base64url");
 }
 
+// ---------------------------------- createAppJwt ----------------------------------
+
 // A short-lived (max 10 min) JWT that authenticates as the GitHub App itself.
 // It can only be used to mint installation tokens, not to touch repos.
 function createAppJwt({ appId, privateKey }: GitHubAppConfig) {
@@ -28,6 +30,8 @@ function createAppJwt({ appId, privateKey }: GitHubAppConfig) {
   );
   return `${header}.${payload}.${base64url(signature)}`;
 }
+
+// ---------------------------------- githubRequest ----------------------------------
 
 async function githubRequest<T>(
   path: string,
@@ -58,6 +62,9 @@ export type InstallationToken = {
   expiresAt: string;
 };
 
+// ---------------------------------- createInstallationToken ----------------------------------
+// createInstallationToken takes installationId -> and from github gets access token -> that has permissions to write contents, pull_requests
+
 // Mints a 1-hour installation token scoped to a single repo with only the
 // permissions the agent needs to push a branch and open a PR.
 export async function createInstallationToken(
@@ -80,9 +87,12 @@ export async function createInstallationToken(
   return { token: result.token, expiresAt: result.expires_at };
 }
 
+// ---------------------------------- revokeInstallationToken ----------------------------------
 export async function revokeInstallationToken(token: string) {
   await githubRequest<void>("/installation/token", token, { method: "DELETE" });
 }
+
+// ---------------------------------- getAppBotIdentity ----------------------------------
 
 // The "<slug>[bot]" identity, so commits made by the agent are attributed to the app.
 // The app JWT only works on /app endpoints, so the user lookup uses the installation token.

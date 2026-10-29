@@ -225,9 +225,26 @@ const messages: ChatMessages[] = [
     role: "system",
     content: `You are a helpful coding agent running inside a sandbox. Use the bash tool to explore files before answering questions about them. For difficult, self-contained subtasks (deep investigations, tracing logic across many files), delegate to the sub_agent tool with a complete task description. The working directory is ${REPO_PATH}, a clone of ${REPO_OWNER}/${REPO_NAME}. Git is authenticated, so you can push branches to origin. To open a pull request, push a new branch (never push to the default branch) and call the GitHub API with the token in $GITHUB_TOKEN, e.g. curl -X POST -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls -d '{"title":"...","head":"<branch>","base":"<default branch>","body":"..."}'. Never print or log the token.`,
   },
+  // {
+  //   role: "user",
+  //   content: `Can you please create style.css file, use existing classes mentioned in index.html. No need to spend too much time doing it. ${REPO_PATH}.`,
+  // },
+
   {
     role: "user",
-    content: `Can you please create style.css file, use existing classes mentioned in index.html. No need to spend too much time doing it. ${REPO_PATH}.`,
+    content: `For the project at ${REPO_PATH}.
+
+  First, read the existing \`index.html\` and identify the CSS classes used in it.
+
+  Then, add css code for first class in style.css file.
+
+  After implementing the styles:
+  1. Verify that \`style.css\` exists and contains the expected CSS rules.
+  2. Review the changes to ensure they only affect \`style.css\`.
+  3. Create a new Git branch, commit the changes, and push the branch to GitHub.
+  4. Open a pull request against the repository's default branch.
+
+  Do not push directly to the default branch. Return the pull request URL when finished.`,
   },
 ];
 
